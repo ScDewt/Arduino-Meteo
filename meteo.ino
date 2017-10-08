@@ -7,13 +7,20 @@
 #include <DallasTemperature.h>
 #include <SoftwareSerial.h>;
 
-#define DHTPIN 7
+// --- PIN define
+#define DHTPIN 8
 #define DHTTYPE DHT22
-#define ONE_WIRE_BUS 8
+#define ONE_WIRE_BUS 4
 #define MHZ_TX 11
 #define MHZ_RX 10
 #define LED_RED 9
-#define LED_GREEN 6
+#define LED_YELLOW 6
+#define LED_GREEN 5
+
+// --- CONST logic
+// период синхронизации - сколько тактов loop должно пройти для синхронизации данных с датчиков
+#define PERIOD_SYNC 5
+
 
 LiquidCrystal_I2C lcd(0x3F, 20, 4);
 DHT dht(DHTPIN, DHTTYPE);
@@ -21,6 +28,7 @@ Adafruit_BMP280 bmp; // I2C
 OneWire oneWire(ONE_WIRE_BUS); 
 DallasTemperature sensors(&oneWire);
 SoftwareSerial mhz(MHZ_TX, MHZ_RX);
+
 
 float dh;  
 float dt; 
@@ -30,10 +38,16 @@ float bp;
 float ba; 
 float st;
 int ppm;
-int preheatSec = 180;
+int currentLoop = 0;
+int preheatSec = 10;
+String CO2Status;
 
-byte cmd[9] = {0xFF,0x01,0x86,0x00,0x00,0x00,0x00,0x00,0x79}; 
+
+byte cmd[9] = {0xFF,0x01,0x86,0x00,0x00,0x00,0x00,0x00,0x79};
+byte cmdABCOff[9] = {0xFF,0x01,0x79,0x00,0x00,0x00,0x00,0x00,0x86}; 
+byte cmdZeroCalibration[9] = {0xFF,0x01,0x87,0x00,0x00,0x00,0x00,0x00,0x78}; 
 unsigned char response[9];
+
 
 void setup()
 {
@@ -44,8 +58,13 @@ void setup()
   sensors.begin(); 
   mhz.begin(9600);
   pinMode(LED_RED, OUTPUT);
+  pinMode(LED_YELLOW, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
+
+  lcd.noCursor();
+  lcd.backlight();
 }
+
 
 int readPPM()
 {
@@ -71,22 +90,61 @@ int readPPM()
   return lppm;
 }
 
+
 void showPreheat()
 {
-  lcd.print("wait    ");
-  lcd.print(preheatSec);
-  lcd.print("s");
-  if (preheatSec < 100 and preheatSec > 9) {
-    lcd.print(" ");
-  }
-  if (preheatSec < 9) {
-    lcd.print("  ");
-  }
+  lcd.print(
+    stringFixLength("CO2  wait    " + String(preheatSec) + "s", 20)
+  );
   preheatSec--;
 }
 
 
-void loop()
+void showLed(int level)
+{
+  switch (level) {
+    case 1: // GOOD
+      analogWrite(LED_RED, 0);
+      analogWrite(LED_YELLOW, 0);
+      analogWrite(LED_GREEN, 200);
+      break;
+    case 2: // NORM
+      analogWrite(LED_RED, 0);
+      analogWrite(LED_YELLOW, 200);
+      analogWrite(LED_GREEN, 50);
+      break;
+    case 3: // HARD
+      analogWrite(LED_RED, 100);
+      analogWrite(LED_YELLOW, 200);
+      analogWrite(LED_GREEN, 0);
+      break;
+    case 4: // HELL
+      analogWrite(LED_RED, 200);
+      analogWrite(LED_YELLOW, 0);
+      analogWrite(LED_GREEN, 0);
+      break;
+    case 9: // ERROR CO2
+      analogWrite(LED_RED, 200);
+      analogWrite(LED_YELLOW, 200);
+      analogWrite(LED_GREEN, 200);
+      break;
+    case 0:
+    default: 
+      analogWrite(LED_RED, 0);
+      analogWrite(LED_YELLOW, 0);
+      analogWrite(LED_GREEN, 0);
+    break;
+  }
+}
+
+String stringFixLength(String str, int length){
+    for(int i = str.length(); i < length; i++)
+        str += ' '; 
+    return str;
+}
+
+
+void readSensors()
 {
   dh = dht.readHumidity();
   dt = dht.readTemperature();
@@ -97,53 +155,58 @@ void loop()
   sensors.requestTemperatures();
   st = sensors.getTempCByIndex(0);
   ppm = readPPM();
+}
 
-  lcd.noCursor();
-  lcd.backlight();
 
-  lcd.setCursor(0, 0);
-  lcd.print("CO2  ");
+void loop()
+{ 
+  if (currentLoop == 0) {
+    readSensors();
+  } else {
+    delay(1000);
+  }
+
+  if (currentLoop++ >= PERIOD_SYNC) {
+    currentLoop = 0;
+  }
 
   if (preheatSec > 0) {
-    showPreheat();
+    CO2Status = "CO2  wait    " + String(preheatSec) + " s";
+    preheatSec--;
   } else {
-    if (ppm < 1000) {
-      lcd.print(" ");
-    }
-    lcd.print(ppm);
-    lcd.print("  ");
+    CO2Status = "CO2  " + stringFixLength(String(ppm), 8); 
     if (ppm < 800) {
-      lcd.print("  GOOD");
-      analogWrite(LED_RED, 0);
-      analogWrite(LED_GREEN, 200);
+      CO2Status += "GOOD";
+      showLed(1);
     } else if(ppm < 1200) {
-      lcd.print("  NORM");
-      analogWrite(LED_RED, 30);
-      analogWrite(LED_GREEN, 70);
+      CO2Status += "NORM";
+      showLed(2);
     } else if(ppm < 2000) {
-      lcd.print("  BAD ");
-      analogWrite(LED_RED, 70);
-      analogWrite(LED_GREEN, 30);
+      CO2Status += "BAD";
+      showLed(3);
     } else {
-      lcd.print("  HELL");
-      analogWrite(LED_RED, 200);
-      analogWrite(LED_GREEN, 0);
+      CO2Status += "HELL";
+      showLed(4);
     }
   }
+
+  lcd.setCursor(0, 0);
+  lcd.print(
+    stringFixLength(CO2Status, 20)
+  );
   
   lcd.setCursor(0, 1);
-  lcd.print("Temp ");
-  lcd.print(dt);
-  lcd.print("   ");
-  lcd.print(st);
-
+  lcd.print(
+    stringFixLength("Temp " + stringFixLength(String(dt), 8) + String(st), 20)
+  );
+  
   lcd.setCursor(0, 2);
-  lcd.print("Humd ");
-  lcd.print(dh);
+  lcd.print(
+    stringFixLength("Humd " + String(dh), 20)
+  );
   
   lcd.setCursor(0, 3);
-  lcd.print("mmHg ");
-  lcd.print(bp * 0.0075);
-  
-  //delay(1000);
+  lcd.print(
+    stringFixLength("mmHg " + String(bp * 0.0075), 20)
+  );
 }
